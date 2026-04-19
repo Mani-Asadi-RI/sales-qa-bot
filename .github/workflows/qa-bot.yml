@@ -3,7 +3,7 @@ name: Sales QA Bot
 on:
   schedule:
     # every 10 minutes (GitHub cron granularity; actual lag can be 5-15 min during peak)
-    - cron: "*/10 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}  # allow manual "Run workflow" button
 
 concurrency:
