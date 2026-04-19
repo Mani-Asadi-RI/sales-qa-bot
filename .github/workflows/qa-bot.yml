@@ -1,0 +1,32 @@
+name: Sales QA Bot
+
+on:
+  schedule:
+    # every 10 minutes (GitHub cron granularity; actual lag can be 5-15 min during peak)
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}  # allow manual "Run workflow" button
+
+concurrency:
+  group: sales-qa-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python sales_qa_bot.py
