@@ -279,25 +279,57 @@ def search_prior_scorecards(
 # Fathom API
 # ─────────────────────────────────────────────────────────────────────
 
-def fetch_fathom_meeting(share_url: str) -> Optional[tuple[dict, str]]:
+def fetch_fathom_meeting(share_url: str) -> tuple[Optional[tuple[dict, str]], bool]:
+    """Return ((meeting, owner), transient_error).
+    - transient_error=True means we hit 5xx/429/connection issues and should retry later,
+      not treat as a permanent 'not found'.
+    """
+    transient_error = False
     for owner, key in FATHOM_KEYS.items():
         cursor = None
         for _ in range(25):
             params: dict[str, Any] = {"include_transcript": "true", "limit": 50}
             if cursor:
                 params["cursor"] = cursor
-            r = requests.get(FATHOM_LIST_URL, headers={"X-Api-Key": key}, params=params, timeout=30)
-            if r.status_code != 200:
-                log(f"  Fathom {owner} returned {r.status_code}: {r.text[:200]}")
+            # Retry the individual request on transient failures before moving on
+            r = None
+            for attempt in range(3):
+                try:
+                    r = requests.get(
+                        FATHOM_LIST_URL,
+                        headers={"X-Api-Key": key},
+                        params=params,
+                        timeout=30,
+                    )
+                except requests.RequestException as e:
+                    log(f"  Fathom {owner} network error (attempt {attempt+1}): {e}")
+                    r = None
+                if r is not None and r.status_code == 200:
+                    break
+                if r is not None and r.status_code in (401, 403, 404):
+                    # hard auth/not-found for this key — stop retrying this key
+                    log(f"  Fathom {owner} returned {r.status_code}: {r.text[:200]}")
+                    break
+                # anything else (5xx, 429, timeout): back off and retry
+                if r is not None:
+                    log(f"  Fathom {owner} returned {r.status_code} (attempt {attempt+1}); retrying")
+                time.sleep(2 ** attempt)
+            if r is None or r.status_code != 200:
+                transient_error = transient_error or (r is None or r.status_code >= 500 or r.status_code == 429)
+                break  # move to next key
+            try:
+                data = r.json()
+            except ValueError:
+                log(f"  Fathom {owner} returned non-JSON body; treating as transient")
+                transient_error = True
                 break
-            data = r.json()
             for item in data.get("items", []):
                 if item.get("share_url") == share_url:
-                    return item, owner
+                    return (item, owner), False
             cursor = data.get("next_cursor")
             if not cursor:
                 break
-    return None
+    return None, transient_error
 
 
 def format_transcript(transcript: list[dict]) -> str:
@@ -659,7 +691,10 @@ def process_one(slack: WebClient, system_prompt: str, item: dict) -> None:
     url = item["share_url"]
     log(f"\n─── Processing {url} (ts={ts})")
 
-    found = fetch_fathom_meeting(url)
+    found, transient = fetch_fathom_meeting(url)
+    if transient:
+        log(f"  Fathom returned transient errors; NOT posting skip — next cron cycle will retry.")
+        return
     if not found:
         msg = (f"_QA SCORECARD — SKIPPED_\n"
                f"Recording not found in any Fathom account (Mani, Bronson, Krisz). "
