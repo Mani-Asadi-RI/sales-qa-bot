@@ -54,14 +54,17 @@ Every call is expected to follow this sequence:
    - Reiterate case studies to reinforce the decision
    - Make sure the prospect is excited and not about to refund
 
+10. **Pre-onboarding checklist sent and receipt confirmed on the call.** Before the call ends, the closer must send the pre-onboarding checklist to the prospect (text/email) AND verbally confirm with the prospect that it was received. Both halves are required: sending without confirming receipt does not satisfy this step, and confirming receipt of something that wasn't sent on the call does not either. This applies to every closed deal call going forward. If the call did not reach a close (no card / no commitment), this step is N/A. If the call closed and the checklist was not sent + confirmed received during the call, that is a compliance violation.
+
 ### Scoring rubric (10-point scale)
 
 ```
-10/10 — All 9 steps executed cleanly. Rare. Must be called out explicitly in the summary.
-9/10  — All 9 steps, with a minor imperfection in one (e.g., post-close expectations were
+10/10 — All 10 steps executed cleanly. Rare. Must be called out explicitly in the summary.
+9/10  — All 10 steps, with a minor imperfection in one (e.g., post-close expectations were
         brief but present).
-8/10  — 8 of 9 steps solid. One step missing or weak. Typical "good call" score.
-7/10  — 6-7 steps solid. Notable gap (e.g., shallow discovery OR no post-close expectations).
+8/10  — 9 of 10 steps solid. One step missing or weak. Typical "good call" score.
+7/10  — 7-8 steps solid. Notable gap (e.g., shallow discovery OR no post-close expectations OR
+        pre-onboarding checklist not sent/confirmed on the call).
 6/10  — Mixed. Core elements present but process was disorganized. Pricing timing may have
         been off, or reflection/value tie-in skipped.
 5/10  — Major process break (e.g., dropped price twice without reframe, OR went to pitch
@@ -85,6 +88,8 @@ Every call is expected to follow this sequence:
 
 **No post-close expectation-setting after card collection:** deduct 1-2 points. This is a common and under-scored violation. The close is not done when the card is collected. The closer must set onboarding expectations, introduce the delivery team or next step, and reinforce the value to prevent buyer's remorse and refund requests.
 
+**Pre-onboarding checklist not sent + confirmed on the call:** deduct 1-2 points. On every closed deal call, the closer must send the pre-onboarding checklist during the call (text/email) AND verbally confirm with the prospect that it was received. Both halves are required. Missing either side (sent but no receipt confirmation, or claimed-sent without evidence in the transcript) is the violation. N/A if the call did not close.
+
 ### What to look for in the transcript (mechanical checklist)
 
 For each call, the LLM should scan the transcript and answer these yes/no questions internally before producing a score:
@@ -105,6 +110,9 @@ Q12. If card was collected, were onboarding expectations set?          [ Y / N /
 Q13. Did the closer drop price more than once without value reframe?   [ Y / N ]  (Y = bad)
 Q14. Did the closer handle objections without neediness?               [ Y / N ]
 Q15. Was the call professionally run (tone, pacing, framing)?          [ Y / N ]
+Q16. If card was collected, did the closer send the pre-onboarding
+     checklist to the prospect AND verbally confirm receipt
+     during the call?                                                  [ Y / N / N/A ]
 ```
 
 Baseline: start at 10 points. Deduct for each "N" on Q1-Q12, Q14, Q15. Deduct double for "Y" on Q13. Floor at 0, cap at 10. Round to nearest integer.

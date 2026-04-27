@@ -612,6 +612,12 @@ CRITICAL SCORING RULES FOR COMPLIANCE:
   selling by setting expectations for onboarding, delivery timelines, and what happens next.
   The close is not done when the card is collected — the closer should reinforce value and
   set the prospect up for a smooth transition into the onboarding process.
+- Deduct 1-2 points on EVERY CLOSED DEAL CALL if the closer does NOT send the pre-onboarding
+  checklist to the prospect during the call AND verbally confirm with the prospect that it
+  was received. Both halves are required: sending without confirming receipt does not
+  satisfy this rule, and confirming receipt of something not actually sent on the call does
+  not either. The transcript must show evidence of both the send and the confirmation. This
+  rule applies on every closed call going forward; mark N/A only when the call did not close.
 - For short follow-up/decline calls: Score relative to what was possible. If the closer
   handled the short call professionally and tried to re-engage, score accordingly.
 
