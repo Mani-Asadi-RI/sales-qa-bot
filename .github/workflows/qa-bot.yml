@@ -10,6 +10,13 @@ concurrency:
   group: sales-qa-bot
   cancel-in-progress: false
 
+# Needed by the heartbeat step, which commits a daily timestamp so the repo
+# stays "active" and GitHub never auto-disables this scheduled workflow again
+# (it was disabled 2026-06-26 after 60 days of no commits, silently killing the
+# QA bot).
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -30,3 +37,16 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python sales_qa_bot.py
+
+      - name: Heartbeat (keep the schedule alive)
+        if: always()
+        run: |
+          mkdir -p .github
+          date -u +%Y-%m-%d > .github/heartbeat
+          if ! git diff --quiet .github/heartbeat; then
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git add .github/heartbeat
+            git commit -m "chore: heartbeat [skip ci]"
+            git push
+          fi
