@@ -163,11 +163,12 @@ def sheet_stats(rows: list[dict], sheet_key: str, week_start: date, week_end: da
 # QA channel stats (#closer-feedback-channel)
 # ─────────────────────────────────────────────────────────────────────
 
-def fetch_channel_since(slack, channel: str, oldest_ts: float) -> list[dict]:
+def fetch_channel_since(slack, channel: str, oldest_ts: float, latest_ts: float) -> list[dict]:
     messages: list[dict] = []
     cursor = None
     while True:
-        kwargs: dict[str, Any] = {"channel": channel, "oldest": str(oldest_ts), "limit": 200}
+        kwargs: dict[str, Any] = {"channel": channel, "oldest": str(oldest_ts),
+                                  "latest": str(latest_ts), "limit": 200}
         if cursor:
             kwargs["cursor"] = cursor
         resp = slack.conversations_history(**kwargs)
@@ -179,7 +180,7 @@ def fetch_channel_since(slack, channel: str, oldest_ts: float) -> list[dict]:
     return messages
 
 
-def qa_stats(slack, week_start_ts: float) -> dict[str, dict[str, Any]]:
+def qa_stats(slack, week_start_ts: float, week_end_ts: float) -> dict[str, dict[str, Any]]:
     from slack_sdk.errors import SlackApiError
 
     per: dict[str, dict[str, Any]] = {
@@ -187,7 +188,7 @@ def qa_stats(slack, week_start_ts: float) -> dict[str, dict[str, Any]]:
                          "repeat_offenses": 0, "acked": 0, "slack_id": c["slack_id"]}
         for c in CLOSERS
     }
-    parents = fetch_channel_since(slack, CLOSER_FEEDBACK_CHANNEL, week_start_ts)
+    parents = fetch_channel_since(slack, CLOSER_FEEDBACK_CHANNEL, week_start_ts, week_end_ts)
     log(f"QA channel: {len(parents)} messages since window start")
 
     for m in parents:
@@ -314,6 +315,8 @@ def main() -> int:
     month_start = today.replace(day=1)
     week_start_ts = datetime(week_start.year, week_start.month, week_start.day,
                              tzinfo=EASTERN).timestamp()
+    week_end_ts = datetime(week_end.year, week_end.month, week_end.day,
+                           tzinfo=EASTERN).timestamp()
 
     log(f"Window: {week_start} to {week_end} (exclusive), MTD from {month_start}")
 
@@ -331,7 +334,7 @@ def main() -> int:
     from slack_sdk import WebClient
     slack = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
 
-    qa = qa_stats(slack, week_start_ts)
+    qa = qa_stats(slack, week_start_ts, week_end_ts)
     text = render(week_start, week_end, today, sheet, qa)
 
     if os.environ.get("DRY_RUN"):
