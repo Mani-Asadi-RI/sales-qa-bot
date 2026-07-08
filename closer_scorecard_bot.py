@@ -10,7 +10,7 @@ Per closer (AJ, Bronson) for the prior week (Mon-Sun):
   - Feedback acknowledgment rate                       (#closer-feedback-channel)
   - Month-to-date close rate vs the 50% bonus target   (B2B Sales Tracker sheet)
 
-Posts to #sales-huddles; falls back to #closer-feedback-channel if the bot
+Posts to #sales-discussion; falls back to #closer-feedback-channel if the bot
 is not a member yet.
 
 Env:
@@ -40,7 +40,7 @@ import requests
 EASTERN = ZoneInfo("America/New_York")
 
 CLOSER_FEEDBACK_CHANNEL = "C0AHZ1QA3GB"
-SALES_HUDDLES_CHANNEL = "C0AFUPFAJKA"
+SALES_DISCUSSION_CHANNEL = "C08U2V0594N"
 
 B2B_ENDPOINT_URL = os.environ.get(
     "B2B_ENDPOINT_URL",
@@ -285,7 +285,7 @@ def post(slack, text: str) -> None:
     from slack_sdk.errors import SlackApiError
 
     override = os.environ.get("SCORECARD_CHANNEL_ID")
-    targets = [override] if override else [SALES_HUDDLES_CHANNEL, CLOSER_FEEDBACK_CHANNEL]
+    targets = [override] if override else [SALES_DISCUSSION_CHANNEL, CLOSER_FEEDBACK_CHANNEL]
     for channel in targets:
         try:
             slack.chat_postMessage(channel=channel, text=text)
