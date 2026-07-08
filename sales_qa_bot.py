@@ -59,8 +59,20 @@ QA_MARKERS = ("QA SCORECARD", "COMPLIANCE RATING", "PROSPECT RATING", "SKIPPED")
 DIVIDER = "\u2014" * 18  # 18 × em dash (matches preferred style)
 MAX_MSG_CHARS = 3400  # keep each Slack message below the auto-split threshold
 
-MODEL = "claude-opus-4-7"
+MODEL = "claude-fable-5"
+FALLBACK_MODEL = "claude-opus-4-8"  # server-side fallback if Fable 5's safety classifiers decline
 CHANNEL_READ_LIMIT = 20
+
+# Closer Slack user IDs — used to tag the closer for the acknowledgment loop.
+# Only closers listed in ACK_REQUIRED get an ACTION REQUIRED reply; the Monday
+# scorecard bot counts their in-thread replies as acknowledgments.
+CLOSER_SLACK_IDS = {
+    "aj": "U0A748MBHK7",
+    "aj asif": "U0A748MBHK7",
+    "bronson": "U0AF0EJHRSS",
+    "bronson boyko": "U0AF0EJHRSS",
+}
+ACK_REQUIRED = ("aj", "aj asif", "bronson", "bronson boyko")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -116,10 +128,11 @@ JSON_SCHEMA: dict[str, Any] = {
                 },
                 "biggest_mistake": {"type": "string", "description": "Max 350 chars. What happened (with HH:MM:SS) + quoted script. Or 'None — no critical error.'"},
                 "missed_buying_signal": {"type": "string", "description": "Max 250 chars. Prospect's exact words + what closer should have done. Or 'None — prospect showed no buying signals.'"},
+                "repeat_offense": {"type": "string", "description": "Max 350 chars. Compare THIS call's mistakes and improvement areas against CLOSER'S RECENT SCORECARDS in the input. If the same behavior repeats, name it bluntly with a count and dates (e.g. 'REPEAT (3rd call since 06/25): discovery after pitch — flagged 06/25 and 07/01, happened again at 00:19:00'). Only flag genuine repeats of the same behavior, not vaguely similar issues. If no recent scorecards were provided or nothing repeats: 'None — first occurrence of all issues flagged.'"},
                 "tone_warning": {"type": "string", "description": "Max 150 chars. 1 sentence or 'None.'"},
                 "verdict": {"type": "string", "description": "Max 350 chars. 1-2 sentences: overall + next action. For follow-ups, assess the full engagement."}
             },
-            "required": ["frame_control", "discovery_depth", "authority_positioning", "objection_handling", "close_attempt", "context_sentence", "closer_issues", "prospect_factors", "what_went_well", "areas_for_improvement", "biggest_mistake", "missed_buying_signal", "tone_warning", "verdict"]
+            "required": ["frame_control", "discovery_depth", "authority_positioning", "objection_handling", "close_attempt", "context_sentence", "closer_issues", "prospect_factors", "what_went_well", "areas_for_improvement", "biggest_mistake", "missed_buying_signal", "repeat_offense", "tone_warning", "verdict"]
         },
         "compliance": {
             "type": "object",
@@ -275,6 +288,54 @@ def search_prior_scorecards(
     return "\n\n---\n\n".join(context_parts) if context_parts else ""
 
 
+def get_closer_recent_feedback(
+    slack: WebClient,
+    closer_name: str,
+    current_ts: str,
+    max_cards: int = 4,
+) -> str:
+    """Collect AREAS FOR IMPROVEMENT + SINGLE BIGGEST MISTAKE sections from the
+    closer's most recent scorecards so Claude can flag repeat offenses."""
+    name = (closer_name or "").strip().lower()
+    if not name:
+        return ""
+    first = name.split()[0]
+    try:
+        hist = slack.conversations_history(channel=CHANNEL_ID, limit=100).get("messages", [])
+    except SlackApiError:
+        return ""
+    cards: list[str] = []
+    for m in hist:
+        if len(cards) >= max_cards:
+            break
+        ts = m.get("ts")
+        if not ts or ts == current_ts:
+            continue
+        cm = re.search(r"Closer:\s*([^\n<]+)", m.get("text") or "", re.IGNORECASE)
+        if not cm or first not in cm.group(1).strip().lower():
+            continue
+        try:
+            replies = slack.conversations_replies(channel=CHANNEL_ID, ts=ts).get("messages", [])
+        except SlackApiError:
+            continue
+        for r in replies[1:]:
+            t = r.get("text") or ""
+            if "SALES QA SCORECARD" not in t.upper():
+                continue
+            chunks = [c.strip() for c in t.split(DIVIDER)]
+            wanted = []
+            for i, c in enumerate(chunks[:-1]):
+                if c in ("AREAS FOR IMPROVEMENT", "SINGLE BIGGEST MISTAKE"):
+                    wanted.append(f"{c}: {chunks[i + 1].strip()[:600]}")
+            if wanted:
+                when = time.strftime("%m/%d", time.localtime(float(ts)))
+                score_m = re.search(r"Overall Score:\s*(\d+)\s*/\s*10", t)
+                score = f", scored {score_m.group(1)}/10" if score_m else ""
+                cards.append(f"[{when}{score}] " + " | ".join(wanted))
+            break
+    return "\n\n".join(cards)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Fathom API
 # ─────────────────────────────────────────────────────────────────────
@@ -369,6 +430,7 @@ def analyze_with_claude(
     owner: str,
     share_url: str,
     prior_context: str,
+    closer_history: str,
 ) -> dict:
     client = anthropic.Anthropic()
 
@@ -379,6 +441,10 @@ def analyze_with_claude(
     domains_type = meeting.get("calendar_invitees_domains_type") or "unknown"
 
     prior_section = f"\n\nPRIOR CALLS WITH THIS PROSPECT (use for multi-call context):\n{prior_context}\n" if prior_context else "\n\nPRIOR CALLS WITH THIS PROSPECT: none found.\n"
+    history_section = (
+        f"\n\nCLOSER'S RECENT SCORECARDS (for repeat-offense detection — these are the closer's own recent calls, NOT this prospect):\n{closer_history}\n"
+        if closer_history else "\n\nCLOSER'S RECENT SCORECARDS: none found.\n"
+    )
 
     user_msg = f"""Analyze ONE Fathom recording per the system-prompt rubric.
 
@@ -391,7 +457,7 @@ Recording metadata:
 
 Calendar invitees:
 {attendees_text}
-{prior_section}
+{prior_section}{history_section}
 
 Transcript (line-numbered, with HH:MM:SS timestamps):
 {transcript_text}
@@ -409,19 +475,27 @@ FORMATTING RULES (critical — the Slack scorecard MUST fit in one message):
 - Follow-up calls: set is_followup=true and write followup_note as "Call #2 with [Name] — follow-up from [date or time]". Score the FULL engagement favorably — do not penalize this call for discovery/pitching that already happened on the first call. A good follow-up after a strong first call deserves a 6-8, not a 3-5.
 - Prospect rating: RAW unclamped scores. Python applies the non-DM Character cap at 4 automatically.
 - Compliance: two separate short paragraphs — `complied_on` (positives) and `missed` (negatives). Both must cite HH:MM:SS timestamps.
+- repeat_offense: compare this call's issues against CLOSER'S RECENT SCORECARDS. Flag only genuine repeats of the same behavior, with count and dates. This is the accountability mechanism — be direct, not diplomatic. If the same mistake keeps appearing, say so plainly.
 - No emojis anywhere.
 
 Return ONLY the JSON object matching the schema. No prose outside the JSON, no code fences.
 """
 
-    response = client.messages.create(
+    response = client.beta.messages.create(
         model=MODEL,
         max_tokens=16000,
         thinking={"type": "adaptive"},
+        betas=["server-side-fallback-2026-06-01"],
+        fallbacks=[{"model": FALLBACK_MODEL}],
         system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_msg}],
         output_config={"format": {"type": "json_schema", "schema": JSON_SCHEMA}},
     )
+
+    if response.stop_reason == "refusal":
+        # Fable 5 and the fallback model both declined — treat like any other
+        # analysis failure: caller logs it and the next cron cycle retries.
+        raise RuntimeError("Model declined to analyze this transcript (stop_reason=refusal)")
 
     # Extract JSON from response
     text = "".join(b.text for b in response.content if b.type == "text").strip()
@@ -550,6 +624,11 @@ def render_scorecard(data: dict) -> str:
         f"MISSED BUYING SIGNAL: {sc.get('missed_buying_signal', '').strip()}",
         "",
         DIVIDER,
+        "REPEAT OFFENSE CHECK",
+        DIVIDER,
+        sc.get("repeat_offense", "").strip() or "None - first occurrence of all issues flagged.",
+        "",
+        DIVIDER,
         "TONE WARNING",
         DIVIDER,
         sc.get("tone_warning", "").strip(),
@@ -674,6 +753,21 @@ def post_thread(slack: WebClient, thread_ts: str, text: str) -> None:
     slack.chat_postMessage(channel=CHANNEL_ID, thread_ts=thread_ts, text=text)
 
 
+def post_ack_request(slack: WebClient, thread_ts: str, closer_name: str) -> None:
+    """Tag the closer so they must reply with a takeaway. The Monday scorecard
+    bot counts a reply from the closer in this thread as acknowledgment."""
+    key = (closer_name or "").strip().lower()
+    if key not in ACK_REQUIRED:
+        return
+    uid = CLOSER_SLACK_IDS.get(key) or CLOSER_SLACK_IDS.get(key.split()[0])
+    if not uid:
+        return
+    text = (f"<@{uid}> ACTION REQUIRED: reply in this thread with your #1 takeaway "
+            "from this feedback within 24 hours. Acknowledgments are tracked on the "
+            "Monday closer scorecard.")
+    slack.chat_postMessage(channel=CHANNEL_ID, thread_ts=thread_ts, text=text)
+
+
 def verify_thread_has_feedback(slack: WebClient, thread_ts: str) -> bool:
     replies = slack.conversations_replies(channel=CHANNEL_ID, ts=thread_ts).get("messages", [])
     return any(
@@ -745,9 +839,17 @@ def process_one(slack: WebClient, system_prompt: str, item: dict) -> None:
     if not prior_context:
         log("  No prior calls found for this prospect.")
 
+    # Closer identity: from the parent message's "Closer:" line, falling back
+    # to the Fathom account owner. Drives repeat-offense memory + ack tagging.
+    closer_match = re.search(r"Closer:\s*([^\n<]+)", item.get("text", ""), re.IGNORECASE)
+    closer_name = closer_match.group(1).strip() if closer_match else owner
+    closer_history = get_closer_recent_feedback(slack, closer_name, ts)
+    if closer_history:
+        log(f"  Repeat-offense context: {len(closer_history)} chars from {closer_name}'s recent scorecards")
+
     log("  Calling Claude...")
     try:
-        data = analyze_with_claude(system_prompt, meeting, owner, url, prior_context)
+        data = analyze_with_claude(system_prompt, meeting, owner, url, prior_context, closer_history)
     except Exception as e:
         log(f"  Claude analysis failed (NOT posting to Slack; will retry next cycle): {e}")
         return
@@ -772,6 +874,8 @@ def process_one(slack: WebClient, system_prompt: str, item: dict) -> None:
     time.sleep(0.5)
     log("  Posting prospect rating...")
     post_thread(slack, ts, render_prospect_rating(data))
+    time.sleep(0.5)
+    post_ack_request(slack, ts, closer_name)
 
     if verify_thread_has_feedback(slack, ts):
         log("  Verified thread has feedback.")
