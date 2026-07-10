@@ -10,10 +10,13 @@ Every weekday morning, posts one list per closer (AJ, Bronson) in
      activity for STALE_DAYS+ days. At ESCALATE_DAYS+ the line is marked
      ESCALATED and tags Mani.
   3. MISSING OUTCOMES  — tracker rows whose appointment already happened but
-     Sales Status or Outcome was never logged (last 30 days).
+     Sales Status or Outcome was never logged.
 
-Deals assigned to anyone else (Mani, Krisz, unassigned) are summarized in a
-single count line so nothing rots invisibly.
+Fresh-start rule: only items whose last activity is on/after FRESH_START are
+tracked daily. Everything older lives on the one-time Pipeline Purge List
+sheet and shows up as a single counter line. Deals assigned to anyone else
+(Mani, Krisz, unassigned) are summarized in one count line so nothing rots
+invisibly.
 
 Sources: GHL opportunities API (all three pipelines) + B2B Sales Tracker
 endpoint. Stateless — ages derive from GHL timestamps, so an ignored deal
@@ -75,8 +78,11 @@ MANI_SLACK_ID = "U08K21YETD2"
 
 STALE_DAYS = 2        # Deal In Progress with no GHL activity for this long -> flagged
 ESCALATE_DAYS = 7     # flagged item this old -> ESCALATED, tags Mani
-BACKLOG_DAYS = 30     # older than this -> collapsed into a purge counter, not listed daily
-SHEET_LOOKBACK_DAYS = 30
+# Fresh-start line (Mani, 2026-07-10): the daily list only tracks items whose
+# last activity is on/after this date. Everything older lives on the one-time
+# Pipeline Purge List sheet and is summarized in a single counter line.
+FRESH_START = date(2026, 7, 7)
+PURGE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1v7pYDh7c7ISvAv60MK2DW1HrRCUBycQFJCRK7fvdVD8/edit"
 MAX_LINES_PER_SECTION = 12
 
 MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
@@ -141,32 +147,39 @@ def _add_deduped(bucket: list, item: dict) -> None:
     bucket.append(item)
 
 
+def _is_fresh(ref_iso: Optional[str]) -> bool:
+    dt = parse_iso(ref_iso)
+    return dt is not None and dt.astimezone(EASTERN).date() >= FRESH_START
+
+
 def collect_ghl_items(now: datetime) -> dict[str, dict[str, Any]]:
-    """Per closer ghl_id: {noshow: [...], debt: [...], backlog_noshow: n, backlog_debt: n};
-    'other' bucket for deals assigned to nobody / other reps."""
+    """Per closer ghl_id: {noshow: [...], debt: [...], purge_noshow: n, purge_debt: n};
+    'other' bucket for deals assigned to nobody / other reps. Items whose last
+    activity predates FRESH_START count toward the purge-sheet counters only."""
     buckets: dict[str, dict[str, Any]] = {
-        c["ghl_id"]: {"noshow": [], "debt": [], "backlog_noshow": 0, "backlog_debt": 0}
+        c["ghl_id"]: {"noshow": [], "debt": [], "purge_noshow": 0, "purge_debt": 0}
         for c in CLOSERS
     }
-    buckets["other"] = {"noshow": [], "debt": [], "backlog_noshow": 0, "backlog_debt": 0}
+    buckets["other"] = {"noshow": [], "debt": [], "purge_noshow": 0, "purge_debt": 0}
 
     for pid, (label, stage5, stage7) in PIPELINES.items():
         for opp in ghl_search_stage(pid, stage5):
-            age = days_since(opp.get("lastStageChangeAt") or opp.get("updatedAt"), now) or 0
+            ref = opp.get("lastStageChangeAt") or opp.get("updatedAt")
             key = opp.get("assignedTo") if opp.get("assignedTo") in buckets else "other"
-            if age > BACKLOG_DAYS:
-                buckets[key]["backlog_noshow"] += 1
+            if not _is_fresh(ref):
+                buckets[key]["purge_noshow"] += 1
                 continue
             _add_deduped(buckets[key]["noshow"],
                          {"name": opp.get("name") or "?", "contact": opp.get("contactId"),
-                          "pipeline": label, "age": age, "value": opp.get("monetaryValue")})
+                          "pipeline": label, "age": days_since(ref, now) or 0,
+                          "value": opp.get("monetaryValue")})
         for opp in ghl_search_stage(pid, stage7):
             age = days_since(opp.get("updatedAt"), now)
             if age is None or age < STALE_DAYS:
                 continue
             key = opp.get("assignedTo") if opp.get("assignedTo") in buckets else "other"
-            if age > BACKLOG_DAYS:
-                buckets[key]["backlog_debt"] += 1
+            if not _is_fresh(opp.get("updatedAt")):
+                buckets[key]["purge_debt"] += 1
                 continue
             _add_deduped(buckets[key]["debt"],
                          {"name": opp.get("name") or "?", "contact": opp.get("contactId"),
@@ -210,7 +223,7 @@ def collect_sheet_items(today: date) -> dict[str, list]:
     log(f"Sheet: {len(rows)} rows")
 
     out: dict[str, list] = {c["sheet_key"]: [] for c in CLOSERS}
-    cutoff = today - timedelta(days=SHEET_LOOKBACK_DAYS)
+    cutoff = FRESH_START
     for row in rows:
         key = (row.get("Closer") or "").strip().lower().split()[:1]
         key = key[0] if key else ""
@@ -276,15 +289,14 @@ def render(now_et: datetime, ghl: dict, sheet: dict) -> str:
         sheet_lines = [f"  {i['name']} — appt {i['date'].strftime('%b %d')} — {i['problem']}" for i in s]
         lines += render_section("MISSING OUTCOMES (tracker)", sheet_lines, "clear")
 
-        backlog = g["backlog_noshow"] + g["backlog_debt"]
-        if backlog:
-            lines.append(f"BACKLOG (older than {BACKLOG_DAYS}d, not listed daily): "
-                         f"{g['backlog_noshow']} no-shows + {g['backlog_debt']} silent deals "
-                         "— needs a one-time purge session: work them or move them to Lost.")
+        purge = g["purge_noshow"] + g["purge_debt"]
+        if purge:
+            lines.append(f"Still on the July purge list (pre-{FRESH_START.strftime('%b %d')} items, "
+                         f"not tracked daily): {purge} deals — {PURGE_SHEET_URL}")
 
     other = ghl["other"]
     other_total = (len(other["noshow"]) + len(other["debt"])
-                   + other["backlog_noshow"] + other["backlog_debt"])
+                   + other["purge_noshow"] + other["purge_debt"])
     if other_total:
         recent = other["debt"] + other["noshow"]
         example = f" (e.g. {', '.join(i['name'] for i in recent[:3])})" if recent else ""
