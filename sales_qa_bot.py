@@ -45,6 +45,7 @@ PROMPT_FILES = [
     BASE_DIR / "Sales-QA-Bot-FULL-COMBINED-Prompt.md",
     BASE_DIR / "qa-rating-methodology-deep-dive.md",
     BASE_DIR / "qa-scorecard-methodology-mani-style.md",
+    BASE_DIR / "qa-knowledge-mani-brain.md",
 ]
 
 FATHOM_KEYS = {
@@ -85,12 +86,12 @@ JSON_SCHEMA: dict[str, Any] = {
     "properties": {
         "classification": {
             "type": "string",
-            "enum": ["qualifying", "skip"],
-            "description": "qualifying = real external-prospect growth consult; skip = internal/interview/vendor/etc."
+            "enum": ["qualifying", "skip", "incomplete"],
+            "description": "qualifying = real external-prospect growth consult (including follow-ups and short-but-complete DQ calls); skip = internal/interview/vendor/etc.; incomplete = call cut off mid-conversation, prospect dropped, tech failure, or too little substantive content to judge fairly (roughly under 10 min with no discovery or pitch). Follow-ups are NEVER incomplete."
         },
         "skip_reason": {
             "type": "string",
-            "description": "If classification=skip, a specific one-sentence reason (e.g. 'Internal team huddle', 'Media buyer interview', 'Job interview'). Empty string if qualifying.",
+            "description": "If classification=skip or incomplete, a specific one-sentence reason (e.g. 'Internal team huddle', 'Media buyer interview', 'Recording cut off at 00:07:41 mid-discovery'). Empty string if qualifying.",
         },
         "call_context": {
             "type": "object",
@@ -140,11 +141,11 @@ JSON_SCHEMA: dict[str, Any] = {
             "properties": {
                 "complied_on": {
                     "type": "string",
-                    "description": "1-3 sentence prose paragraph (under 500 chars) naming what the closer did RIGHT on this call. Reference HH:MM:SS timestamps. Cover any of: discovery before pitch, value tie-in, buy-in before pricing, benchmarks within 20% ($100/day→14, $150→21, $200→25), 12-week program framing, concrete next step, post-close expectations, use of Mani signature language ('let me ask', 'my clients', named case studies), price-drop discipline."
+                    "description": "1-4 sentence prose paragraph (under 650 chars) naming what the closer did RIGHT on this call. Reference HH:MM:SS timestamps. Cover any of: discovery before pitch, value tie-in, buy-in before pricing, benchmarks within 20% ($100/day→14, $150→21, $200→25), 12-week program framing, concrete next step, post-close expectations, use of Mani signature language ('let me ask', 'my clients', named case studies), price-drop discipline. ON CLOSING CALLS also check the OFFER CANON (C1-C5: 4-week billing vs 12-week/3-cycle term stated; cycle 1 explicitly set as slowest; shortfall deducted against retainer within 20% MoE; cycles 2-3 hit guarantees stated; under-50% escape) and the ONBOARDING WALKTHROUGH (O1-O3: creatives shown, creative-collection needs explained, assets folder shown) per the QA KNOWLEDGE file."
                 },
                 "missed": {
                     "type": "string",
-                    "description": "1-3 sentence prose paragraph (under 500 chars) naming what the closer MISSED or broke. Reference HH:MM:SS timestamps. Cover deductions from the same Mani-style checklist."
+                    "description": "1-4 sentence prose paragraph (under 650 chars) naming what the closer MISSED or broke. Reference HH:MM:SS timestamps. Cover deductions from the same Mani-style checklist PLUS, on closing calls, any missing OFFER CANON element (C1-C5) or ONBOARDING WALKTHROUGH element (O1-O3) by name. If the call never reached pricing/close territory, write 'Offer canon & onboarding walkthrough: N/A — call ended pre-close' instead of penalizing those."
                 },
                 "score": {"type": "integer", "description": "0-10. Consider the full engagement on follow-ups, not just this call."}
             },
@@ -463,9 +464,9 @@ Transcript (line-numbered, with HH:MM:SS timestamps):
 {transcript_text}
 
 INSTRUCTIONS:
-1. Decide classification: "qualifying" = external-prospect growth consult; "skip" = internal team meeting / interview / vendor call / non-sales. Impromptu Zoom meetings CAN be real consults — judge from transcript content, not title.
-2. If skip: fill skip_reason with one specific sentence; leave other fields with reasonable placeholder values.
-3. If qualifying: fill ALL fields per the schema.
+1. Decide classification: "qualifying" = external-prospect growth consult; "skip" = internal team meeting / interview / vendor call / non-sales; "incomplete" = the call did not fully take place (cut off mid-conversation, prospect dropped and never returned, tech failure, or too little substantive content to judge fairly — roughly under 10 minutes with no discovery or pitch content). Impromptu Zoom meetings CAN be real consults — judge from transcript content, not title. A short call that reached a NATURAL end (e.g., a clean 20-minute disqualification) is qualifying, NOT incomplete. A follow-up call is qualifying with is_followup=true, NEVER incomplete.
+2. If skip or incomplete: fill skip_reason with one specific sentence; leave other fields with reasonable placeholder values.
+3. If qualifying: fill ALL fields per the schema. Ground feedback in the QA KNOWLEDGE — MANI BRAIN layer: cite its coaching rules and win/loss evidence where relevant, quote Mani's model language for fixes, and apply the per-closer watch list for this closer. On follow-ups, set categories that already happened on a prior call (typically discovery) to null instead of penalizing them.
 
 FORMATTING RULES (critical — the Slack scorecard MUST fit in one message):
 - In prose fields, reference moments by HH:MM:SS timestamp ONLY (e.g., "at 00:05:23" or "00:18:00-00:22:34"). Do NOT use [line number] brackets.
@@ -859,6 +860,15 @@ def process_one(slack: WebClient, system_prompt: str, item: dict) -> None:
         msg = (f"_QA SCORECARD — SKIPPED_\n"
                f"{reason}\nQA analysis not applicable.\n\n")
         log(f"  Classified as skip: {reason}")
+        post_thread(slack, ts, msg)
+        return
+
+    if data.get("classification") == "incomplete":
+        reason = data.get("skip_reason", "Call did not fully take place.")
+        msg = (f"_QA SCORECARD — NOT SCORED (INCOMPLETE CALL)_\n"
+               f"{reason}\nNo score assigned — the call did not fully take place. "
+               f"If the conversation continues, the next call will be QA'd as a follow-up.\n\n")
+        log(f"  Classified as incomplete: {reason}")
         post_thread(slack, ts, msg)
         return
 
