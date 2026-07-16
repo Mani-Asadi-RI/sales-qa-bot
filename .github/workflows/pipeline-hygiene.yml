@@ -2,8 +2,9 @@ name: Daily Pipeline Hygiene
 
 on:
   schedule:
-    # Weekdays 12:00 UTC = 8:00 AM EDT (7:00 AM EST in winter)
-    - cron: "0 12 * * 1-5"
+    # Mon/Wed/Fri 12:00 UTC = 8:00 AM EDT — every other day per AJ's feedback
+    # (sales meeting 2026-07-16); was daily.
+    - cron: "0 12 * * 1,3,5"
   workflow_dispatch: {}  # allow manual "Run workflow" button
 
 concurrency:

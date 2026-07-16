@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Daily Pipeline Hygiene Bot — the follow-up enforcer.
+"""Pipeline Hygiene Bot — the follow-up enforcer.
 
-Every weekday morning, posts one list per closer (AJ, Bronson) in
-#sales-discussion of every deal that needs action TODAY:
+Every OTHER weekday morning (Mon/Wed/Fri — AJ's feedback, sales meeting
+2026-07-16), posts one list per closer (AJ, Bronson) in #sales-discussion
+of every deal that needs action TODAY:
 
   1. NO-SHOW RECOVERY  — every open deal in stage #5 (no show), with age.
      Never falls off until rescheduled or moved to Lost.
@@ -11,6 +12,11 @@ Every weekday morning, posts one list per closer (AJ, Bronson) in
      ESCALATED and tags Mani.
   3. MISSING OUTCOMES  — tracker rows whose appointment already happened but
      Sales Status or Outcome was never logged.
+  4. LOST REVIVAL WATCH — stage-6 (Lost) deals with activity after being
+     marked lost (prospect re-engaged) within the last REVIVAL_WINDOW_DAYS.
+
+Contacts tagged lost in GHL are excluded from lists 1-2 even if a duplicate
+opportunity in another pipeline is still open (AJ's feedback, 2026-07-16).
 
 Fresh-start rule: only items whose last activity is on/after FRESH_START are
 tracked daily. Everything older lives on the one-time Pipeline Purge List
@@ -57,17 +63,20 @@ B2B_ENDPOINT_URL = os.environ.get(
 )
 B2B_API_TOKEN = os.environ.get("B2B_API_TOKEN", "b2b_0WjbYUXFCny_c6yqxGM2iDMRY0sjbIK7wEusS2DWfzI")
 
-# pipeline id -> (label, stage5_noshow_id, stage7_inprogress_id)
+# pipeline id -> (label, stage5_noshow_id, stage7_inprogress_id, stage6_lost_id)
 PIPELINES = {
     "RndkDrnqLz5X5Ff7CNjm": ("Roofing",
                              "741cabd6-4ed0-4209-8d4b-4e2825ae5350",
-                             "da14994c-3838-4c07-872a-003a125a3774"),
+                             "da14994c-3838-4c07-872a-003a125a3774",
+                             "c020529d-3be6-4af1-ae1f-e1f9764d6e20"),
     "5JhQfYeeu9O4eAjR89mR": ("HVAC",
                              "92556e69-56aa-461e-bd4d-bd97fc5d1015",
-                             "c19c969b-e808-4987-a5bb-422c773ae76a"),
+                             "c19c969b-e808-4987-a5bb-422c773ae76a",
+                             "bbef3085-868e-486b-9a8d-f2c033cb4e2c"),
     "dcD7SJR2L2PlZZUlqH9f": ("Windows/Doors",
                              "d273d7f2-fda9-46b4-b10e-d4c821426487",
-                             "1463f12a-77cc-44e2-833f-5fdc258523ae"),
+                             "1463f12a-77cc-44e2-833f-5fdc258523ae",
+                             "98bc1cd5-3f86-4dcd-96cb-11ea56521c7b"),
 }
 
 CLOSERS = [
@@ -84,6 +93,9 @@ ESCALATE_DAYS = 7     # flagged item this old -> ESCALATED, tags Mani
 FRESH_START = date(2026, 7, 7)
 PURGE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1v7pYDh7c7ISvAv60MK2DW1HrRCUBycQFJCRK7fvdVD8/edit"
 MAX_LINES_PER_SECTION = 12
+# Lost deals with activity in the last N days (after being marked lost) show
+# in a REVIVAL WATCH section (AJ/Mani feedback, sales meeting 2026-07-16).
+REVIVAL_WINDOW_DAYS = 7
 
 MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
           "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
@@ -152,18 +164,31 @@ def _is_fresh(ref_iso: Optional[str]) -> bool:
     return dt is not None and dt.astimezone(EASTERN).date() >= FRESH_START
 
 
+def _is_lost_tagged(opp: dict) -> bool:
+    """GHL stamps '#6: lost deal'-style tags on the CONTACT when a deal is
+    lost, but a duplicate opportunity in another pipeline can stay open —
+    which kept lost leads on the daily list (AJ, 2026-07-16). Treat a
+    lost-tagged contact as lost everywhere."""
+    tags = [t.lower() for t in ((opp.get("contact") or {}).get("tags") or [])]
+    return any("lost deal" in t or t == "lost" for t in tags)
+
+
 def collect_ghl_items(now: datetime) -> dict[str, dict[str, Any]]:
     """Per closer ghl_id: {noshow: [...], debt: [...], purge_noshow: n, purge_debt: n};
     'other' bucket for deals assigned to nobody / other reps. Items whose last
     activity predates FRESH_START count toward the purge-sheet counters only."""
     buckets: dict[str, dict[str, Any]] = {
-        c["ghl_id"]: {"noshow": [], "debt": [], "purge_noshow": 0, "purge_debt": 0}
+        c["ghl_id"]: {"noshow": [], "debt": [], "revival": [], "purge_noshow": 0, "purge_debt": 0}
         for c in CLOSERS
     }
-    buckets["other"] = {"noshow": [], "debt": [], "purge_noshow": 0, "purge_debt": 0}
+    buckets["other"] = {"noshow": [], "debt": [], "revival": [], "purge_noshow": 0, "purge_debt": 0}
+    lost_skipped = 0
 
-    for pid, (label, stage5, stage7) in PIPELINES.items():
+    for pid, (label, stage5, stage7, stage6) in PIPELINES.items():
         for opp in ghl_search_stage(pid, stage5):
+            if _is_lost_tagged(opp):
+                lost_skipped += 1
+                continue
             ref = opp.get("lastStageChangeAt") or opp.get("updatedAt")
             key = opp.get("assignedTo") if opp.get("assignedTo") in buckets else "other"
             if not _is_fresh(ref):
@@ -174,6 +199,9 @@ def collect_ghl_items(now: datetime) -> dict[str, dict[str, Any]]:
                           "pipeline": label, "age": days_since(ref, now) or 0,
                           "value": opp.get("monetaryValue")})
         for opp in ghl_search_stage(pid, stage7):
+            if _is_lost_tagged(opp):
+                lost_skipped += 1
+                continue
             age = days_since(opp.get("updatedAt"), now)
             if age is None or age < STALE_DAYS:
                 continue
@@ -184,7 +212,23 @@ def collect_ghl_items(now: datetime) -> dict[str, dict[str, Any]]:
             _add_deduped(buckets[key]["debt"],
                          {"name": opp.get("name") or "?", "contact": opp.get("contactId"),
                           "pipeline": label, "age": age, "value": opp.get("monetaryValue")})
-        log(f"GHL {label}: scanned stages 5+7")
+        # Lost deals that show activity AFTER being marked lost = revival candidates.
+        for opp in ghl_search_stage(pid, stage6):
+            key = opp.get("assignedTo")
+            if key not in buckets or key == "other":
+                continue  # revival watch is per-closer only
+            active_age = days_since(opp.get("updatedAt"), now)
+            lost_age = days_since(opp.get("lastStageChangeAt"), now)
+            if (active_age is None or lost_age is None
+                    or active_age > REVIVAL_WINDOW_DAYS      # no recent activity
+                    or lost_age - active_age < 1):           # activity = the lost-move itself
+                continue
+            _add_deduped(buckets[key]["revival"],
+                         {"name": opp.get("name") or "?", "contact": opp.get("contactId"),
+                          "pipeline": label, "age": active_age, "lost_age": lost_age,
+                          "value": opp.get("monetaryValue")})
+        log(f"GHL {label}: scanned stages 5+6+7")
+    log(f"Excluded {lost_skipped} open deal(s) whose contact is tagged lost")
 
     for b in buckets.values():
         b["noshow"].sort(key=lambda x: -x["age"])
@@ -267,7 +311,7 @@ def render_section(title: str, lines: list[str], empty_note: str) -> list[str]:
 def render(now_et: datetime, ghl: dict, sheet: dict) -> str:
     divider = "—" * 18
     lines = [
-        f"DAILY PIPELINE HYGIENE — {now_et.strftime('%a %b %d')}",
+        f"PIPELINE HYGIENE — {now_et.strftime('%a %b %d')} (posts Mon/Wed/Fri)",
         "Every deal below needs ONE of these today: follow-up logged in GHL, reschedule booked, or moved to Lost.",
     ]
     for c in CLOSERS:
@@ -288,6 +332,13 @@ def render(now_et: datetime, ghl: dict, sheet: dict) -> str:
 
         sheet_lines = [f"  {i['name']} — appt {i['date'].strftime('%b %d')} — {i['problem']}" for i in s]
         lines += render_section("MISSING OUTCOMES (tracker)", sheet_lines, "clear")
+
+        if g["revival"]:
+            revival_lines = [f"  {i['name']} — {i['pipeline']} — active {i['age']}d ago "
+                             f"(marked lost {i['lost_age']}d ago){fmt_value(i['value'])}"
+                             for i in g["revival"]]
+            lines += render_section("LOST — REVIVAL WATCH (activity after marked lost)",
+                                    revival_lines, "none")
 
         purge = g["purge_noshow"] + g["purge_debt"]
         if purge:
